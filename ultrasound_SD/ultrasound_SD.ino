@@ -1,7 +1,7 @@
 /**************************************
  * Arduino code for the UNESCO Open Hardware Cookbook
  * 
- * This is an example implements a simple script to operate 
+ * This is an example sketch to operate 
  * the Adafruit Feather M0 based data logger with
  * Maxbotix Ultrasound distance sensor,
  * which is included in the Open Hardware Testkit
@@ -12,7 +12,7 @@
  *
  * NOTES:
  * - Set the board definition to "Adafruit Feather M0 (SAMD21"
- * - For instructions on how to install the board definnitions, see"
+ * - For instructions on how to install the board definitions, see"
  *   https://learn.adafruit.com/adafruit-feather-m0-adalogger/setup
  * - Also don't forget to set the right upload port
  *   (if more than one shows up then it is typically the one that has
@@ -20,7 +20,9 @@
  * 
  * This script is based on the adalogger.ino example from Adafruit:
  * https://gist.github.com/ladyada/13efab4022b7358033c7
- * with adaptations by Riverlabs Ltd,
+ * with adaptations by Riverlabs Ltd and Imperial College London
+ *
+ * All modifications are (c) Wouter Buytaert
  * 
  */
 
@@ -28,10 +30,16 @@
 
 #define READ_INTERVAL 5                           // Interval for sensor readings, in minutes
 #define NREADINGS 9                               // number of readings taken per measurement (excluding 0 values)
+#define CARDSELECT 4
+#define DEBUGSERIAL Serial1                       // This makes it easy to switch between Serial and Serial1
 
 /************* INCLUDES *******************/
 
-// make sure that all the required libraries are installed!
+// make sure that all the required libraries are installed. You will need:
+// - Time by Michael Margolis
+// - SD by Arduino, SparkFun
+// - RTCZero by Arduino
+// These can be installed through the Library Manager of the Arduino IDE
 
 #include <TimeLib.h>
 #include <RTCZero.h>
@@ -40,93 +48,155 @@
 
 /******** VARIABLE DECLARATIONS ***********/
 
-// Clock stuff
+// Clock variables
 RTCZero rtc;
 uint32_t CompileTime;
 uint32_t CurrentTime;
+uint8_t myday = 40;
+char datestring[20];
 
-// variables needed in interrupt should be of type volatile.
-
-volatile uint16_t interruptCount = 0;
+// variables used in the clock interrupt function should be of type volatile.
 volatile bool interruptFlag = false;
 
-// SD card stuff
-
-char filename[15];
-
+// SD card variables 
+char filename[] = "00000000.CSV";
 int16_t distance = -9999;
+File myfile;
 
-
-// Set the pins used
-#define cardSelect 4
-
-File logfile;
-
-// This line is not needed if you have Adafruit SAMD board package 1.6.2+
-//   #define Serial SerialUSB
+// other variables
+int16_t measuredvbat;
 
 void setup() {
 
-  Serial.begin(115200);
-  //while(!Serial);
-  Serial.println("Hello, I am a Riverlabs Utrasonic distance logger");
+  DEBUGSERIAL.begin(9600);
+  while(!DEBUGSERIAL);
+  #if DEBUGSERIAL != Serial1
+    Serial1.begin(9600);
+  #endif
+  DEBUGSERIAL.println("Hello, I am a Riverlabs Ultrasonic distance logger");
 
+  // pin 13 is used for the LED.
   pinMode(13, OUTPUT);
   digitalWrite(13, LOW);
+  // Pin 5 is used as power supply for the ultrasound sensor
   pinMode(5, OUTPUT);
   digitalWrite(5, LOW);
 
   // First check, and if necessary, set the time
 
   CompileTime = cvt_date(__DATE__, __TIME__);
-
   rtc.begin();
   CurrentTime = rtc.getEpoch();
-  Serial.println("The clock time is ");
-  PrintDateTime();
-  Serial.println();
+  DEBUGSERIAL.print("The clock time is ");
+  formatDateTime();
+  DEBUGSERIAL.print(datestring);
+  DEBUGSERIAL.println();
   if(CurrentTime < CompileTime) {
-      Serial.println("This seems wrong. Setting the clock to");
-      rtc.setEpoch(CompileTime);
-      PrintDateTime();
+    DEBUGSERIAL.println("This seems wrong. Setting the clock to");
+    rtc.setEpoch(CompileTime);
+    formatDateTime();
+    DEBUGSERIAL.print(datestring);
+    DEBUGSERIAL.println();
   }
 
-  // see if the card is present and can be initialized:
-  //if (!SD.begin(cardSelect)) {
-  //  Serial.println("Card init. failed!");
-  //  error(2);
-  //}
+  // Set the alarm. We'll set it to go off every minute, but then check
+  // whether it matches the measurement interval or not.
+  // We should also set the interrupt function!
 
+  rtc.setAlarmSeconds(0);
+  rtc.enableAlarm(rtc.MATCH_SS);
+  rtc.attachInterrupt(InterruptServiceRoutine);
 
+  // Check if the SD card is present and can be initialized
 
-
-  // logfile = SD.open(filename, FILE_WRITE);
-  // if( ! logfile ) {
-  //   Serial.print("Couldnt create "); 
-  //   Serial.println(filename);
-  //   error(3);
-  // }
-  // Serial.print("Writing to "); 
-  // Serial.println(filename);
-
-  // pinMode(13, OUTPUT);
-  // pinMode(8, OUTPUT);
-  // Serial.println("Ready!");
+  if (!SD.begin(CARDSELECT)) {
+    DEBUGSERIAL.println("Card initialisation failed!");
+    error(2);
+  } else {
+    getFilename(rtc);
+    myday = rtc.getDay();
+    myfile = SD.open(filename, FILE_WRITE);
+    if( !myfile ) {
+      DEBUGSERIAL.print("Could not create a file on the SD card: "); 
+      DEBUGSERIAL.println(filename);
+      error(3);
+    } else {
+      DEBUGSERIAL.println("SD card found and ready to write");
+      myfile.close();
+      digitalWrite(13, HIGH);
+      delay(1000);
+      digitalWrite(13, LOW);
+    }
+  }
+  delay(5000); // needed to let the Arduino IDE verify that uploading has finished properly
 }
 
-uint8_t i=0;
 void loop() {
-  digitalWrite(8, HIGH);
-  //logfile.print("A0 = "); logfile.println(analogRead(0));
-  Serial.print("A0 = "); Serial.println(analogRead(0));
-  digitalWrite(8, LOW);
-  distance = readMaxBotix(5, 9, 1);
-  Serial.print("distance = "); Serial.println(distance);
-  delay(5000);
+
+  if(!interruptFlag) {
+    
+    DEBUGSERIAL.println(F("Sleeping"));
+    DEBUGSERIAL.flush();
+
+    rtc.standbyMode();
+
+    /* if interrupt wakes us up, then we take action: */
+    DEBUGSERIAL.println(F("Waking up!"));
+  }
+      
+  interruptFlag = false;                              // reset the flag
+
+  if(rtc.getMinutes() % READ_INTERVAL == 0) {         // only take measurement if interval threshold is exceeded         
+
+    digitalWrite(13, HIGH);
+    measuredvbat = analogRead(A7) * 2 * 3.3 / 1.024;
+    distance = readMaxBotix(5, 9, 1);
+    digitalWrite(13, LOW);
+
+    DEBUGSERIAL.print("Battery voltage = ");
+    DEBUGSERIAL.println(measuredvbat);
+    DEBUGSERIAL.print("Distance = ");
+    DEBUGSERIAL.println(distance);
+
+    // Store the data on the SD card. Change the file every day.
+    if(rtc.getDay() != myday) {
+      getFilename(rtc);
+      myday = rtc.getDay();
+    }
+    if (!SD.begin(CARDSELECT)) {
+      DEBUGSERIAL.println("Card initialisation failed!");
+      error(2);
+    } else {
+      myfile = SD.open(filename, FILE_WRITE);
+      if( !myfile ) {
+        DEBUGSERIAL.print("Could not open a file on the SD card: "); 
+        DEBUGSERIAL.println(filename);
+        error(3);
+      } else {
+        formatDateTime();
+        myfile.print(datestring);
+        myfile.print(", ");
+        myfile.print(measuredvbat);
+        myfile.print(", ");
+        myfile.println(distance);
+        myfile.close();
+        DEBUGSERIAL.println("Data written to SD card!");
+        delay(100);         // give the SD card time to write and close the file
+      }
+    }
+  }
 }
 
 
-// Various helper functions below
+/*************** Additional functions *****************/
+
+// interrupt function. Should be as short as possible
+
+void InterruptServiceRoutine() {
+    interruptFlag = true;
+}
+
+
 
 int16_t readMaxBotix(uint8_t powerPin, uint8_t nreadings, bool debug) {
 
@@ -136,12 +206,7 @@ int16_t readMaxBotix(uint8_t powerPin, uint8_t nreadings, bool debug) {
       readings[i] = -1;
     }
 
-    // select the type of serial on the basis of the serialPin
-
-
-    Serial1.begin(9600);
-
-    digitalWrite(13, HIGH);
+    digitalWrite(13, HIGH);                     // LED
     digitalWrite(powerPin, HIGH);
     delay(160);   // wait 160ms for startup and boot message to pass
     
@@ -156,21 +221,15 @@ int16_t readMaxBotix(uint8_t powerPin, uint8_t nreadings, bool debug) {
         }
     }
 
-    Serial1.end();
-
     digitalWrite(powerPin, LOW);
     digitalWrite(13, LOW);
-
-    // Note: if more than half of the array is not filled because of read errors
-    // then the median will be -1. Fine for now, because this just means that
-    // not enough readings could be taken to return a reliable measurement.
             
     int16_t distance = median(readings, nreadings);
 
     return distance;
 }
 
-/* function copied from the TTL_ArduinoCode_Parsing example on the Arduino forum */
+/* function adapted from the TTL_ArduinoCode_Parsing example on the Arduino forum */
 
 int EZread(Stream &stream) {
   
@@ -244,30 +303,6 @@ void error(uint8_t errno) {
   }
 }
 
-void PrintDateTime() {
-    // Print date...
-  Serial.print(rtc.getDay());
-  Serial.print("/");
-  Serial.print(rtc.getMonth());
-  Serial.print("/");
-  Serial.print(rtc.getYear());
-  Serial.print("\t");
-
-  // ...and time
-  print2digits(rtc.getHours());
-  Serial.print(":");
-  print2digits(rtc.getMinutes());
-  Serial.print(":");
-  print2digits(rtc.getSeconds());
-}
-
-void print2digits(int number) {
-  if (number < 10) {
-    Serial.print("0");
-  }
-  Serial.print(number);
-}
-
 void bubbleSort(int16_t A[],int len)
 {
   unsigned long newn;
@@ -305,3 +340,37 @@ int16_t median(int16_t samples[],int m) //calculate the median
   }
 }
 
+// Create file name 
+
+void getFilename(RTCZero rtc) {
+  uint8_t year = rtc.getYear();
+  uint8_t month = rtc.getMonth();
+  uint8_t day = rtc.getDay();
+  filename[0] = '2';
+  filename[1] = '0';
+  filename[2] = year/10 + '0';
+  filename[3] = year%10 + '0';
+  filename[4] = month/10 + '0';
+  filename[5] = month%10 + '0';
+  filename[6] = day/10 + '0';
+  filename[7] = day%10 + '0';
+  filename[8] = '.';
+  filename[9] = 'C';
+  filename[10] = 'S';
+  filename[11] = 'V';
+  return;
+}
+
+#define countof(a) (sizeof(a) / sizeof(a[0]))
+
+void formatDateTime() {
+  snprintf_P(datestring, 
+      countof(datestring),
+      PSTR("%04u/%02u/%02u %02u:%02u:%02u"),
+      rtc.getYear() + 2000,
+      rtc.getMonth(),
+      rtc.getDay(),
+      rtc.getHours(),
+      rtc.getMinutes(),
+      rtc.getSeconds() );
+}
