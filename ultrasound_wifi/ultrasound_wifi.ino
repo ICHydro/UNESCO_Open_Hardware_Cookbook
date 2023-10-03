@@ -5,9 +5,11 @@
  * the Adafruit Feather M0 based data logger with
  * Maxbotix Ultrasound distance sensor,
  * which is included in the Open Hardware Testkit
+ * 
+ * For this test you should use the Adafruit Feather M0 Wifi (ATWINC1500) board
  *
  * The script reads a value from the distance sensor and
- * writes it to the SD card at a predefined interval
+ * sends it via wifi 
  * (see READ_INTERVAL definition below)
  *
  * NOTES:
@@ -28,15 +30,15 @@
 
 /*********** MAIN LOGGER SETTINGS *********/
 
-#define READ_INTERVAL 5                           // Interval for sensor readings, in minutes
-#define NREADINGS 9                               // number of readings taken per measurement (excluding 0 values)
-#define cardSelect 4
-#define DebugSerial Serial                       // This makes it easy to switch between Serial and Serial1
+#define READ_INTERVAL 5                        // Interval for sensor readings, in minutes
+#define NREADINGS 9                             // number of readings taken per measurement (excluding 0 values)
+#define DEBUGSERIAL Serial                      // This makes it easy to switch between Serial and Serial1
 
 /************* INCLUDES *******************/
 
 // make sure that all the required libraries are installed. You will need:
 // - Time by Michael Margolis
+// - ArduinoMqttClient by Arduino
 // - Wifi101 by Arduino
 // - RTCZero by Arduino
 // These can be installed through the Library Manager of the Arduino IDE
@@ -44,9 +46,34 @@
 #include <TimeLib.h>
 #include <RTCZero.h>
 #include <SPI.h>
-#include <SD.h>
+#include <ArduinoMqttClient.h>
+#include <WiFi101.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include "arduino_secrets.h" 
 
 /******** VARIABLE DECLARATIONS ***********/
+
+// network
+
+char ssid[] = SECRET_SSID;
+char pass[] = SECRET_PASS;
+int keyIndex = 0;
+int status = WL_IDLE_STATUS;
+WiFiClient client;
+MqttClient mqttClient(client);
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP);
+
+const char broker[] = BROKER;
+int        port     = 1883;
+const char topic[]  = "v1/devices/me/telemetry";
+const char token[]  = TOKEN;
+
+int count = 0;
+uint8_t i;
+char myMessage[60];
+uint16_t messageLength = 0;
 
 // Clock variables
 RTCZero rtc;
@@ -56,19 +83,16 @@ uint32_t CurrentTime;
 // variables used in the clock interrupt function should be of type volatile.
 volatile bool interruptFlag = false;
 
-// SD card variables 
-char filename[] = "00000000.CSV";
-int16_t distance = -9999;
-File myfile;
-
 // other variables
 int16_t measuredvbat;
+int16_t distance = -9999;
 
 void setup() {
 
-  DebugSerial.begin(9600);
-  while(!DebugSerial);
-  DebugSerial.println("Hello, I am a Riverlabs Ultrasonic distance logger");
+  WiFi.setPins(8,7,4,2);
+  DEBUGSERIAL.begin(9600);
+  while(!DEBUGSERIAL);
+  DEBUGSERIAL.println("Hello, I am a Riverlabs Ultrasonic distance logger");
 
   // pin 13 is used for the LED.
   pinMode(13, OUTPUT);
@@ -77,57 +101,70 @@ void setup() {
   pinMode(5, OUTPUT);
   digitalWrite(5, LOW);
 
-  // First check, and if necessary, set the time
-
-  CompileTime = cvt_date(__DATE__, __TIME__);
-  rtc.begin();
-  CurrentTime = rtc.getEpoch();
-  DebugSerial.print("The clock time is ");
-  PrintDateTime();
-  DebugSerial.println();
-  if(CurrentTime < CompileTime) {
-    DebugSerial.println("This seems wrong. Setting the clock to");
-    rtc.setEpoch(CompileTime);
-    PrintDateTime();
-  }
-
   // Set the alarm. We'll set it to go off every minute, but then check
   // whether it matches the measurement interval or not.
   // We should also set the interrupt function!
 
+  rtc.begin();
   rtc.setAlarmSeconds(0);
   rtc.enableAlarm(rtc.MATCH_SS);
   rtc.attachInterrupt(InterruptServiceRoutine);
 
-  // Check if the SD card is present and can be initialized
+  // check for the presence of the wifi module:
 
-  if (!SD.begin(cardSelect)) {
-    DebugSerial.println("Card initialisation failed!");
-    error(2);
+  if (WiFi.status() == WL_NO_SHIELD) {
+    DEBUGSERIAL.println("Cannot find the WiFi module. Are you using the right board?");
+    // don't continue:
+    while (true);
+  } else {
+    DEBUGSERIAL.println("Wifi found.");
   }
 
-  getFilename(rtc);
-  myday = rtc.getDay();
-  myfile = SD.open(filename, FILE_WRITE);
-  if( !myfile ) {
-    DebugSerial.print("Could not create a file on the SD card: "); 
-    DebugSerial.println(filename);
-    error(3);
+  // Make 3 attempts to connect to WiFi network.
+  i = 2;
+
+  while ((status != WL_CONNECTED) && (i > 0)) {
+    DEBUGSERIAL.print("Attempting to connect to SSID: ");
+    DEBUGSERIAL.println(ssid);
+    // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
+    status = WiFi.begin(ssid, pass);
+
+    // wait 10 seconds for connection:
+    delay(10000);
+    i--;
   }
-  DebugSerial.println("SD card found and ready to write");
+  if(status = WL_CONNECTED) {
+    DEBUGSERIAL.println("Connected to wifi");
+    printWiFiStatus();
+    DEBUGSERIAL.println("Getting network clock (NTP)");
+    timeClient.begin();
+    if(timeClient.update()) {
+      rtc.setEpoch(timeClient.getEpochTime());
+      DEBUGSERIAL.print(F("NTP received. Clock is set to: "));
+      PrintDateTime();
+      DEBUGSERIAL.print(" UTC");
+      DEBUGSERIAL.println();
+    }
+  } else {
+    DEBUGSERIAL.println("Failed to connect to the wifi network. Check coverage and settings");
+  }
+
+  mqttClient.setCleanSession(true);
+  mqttClient.setUsernamePassword(token, "");
+
 }
 
 void loop() {
 
   if(!interruptFlag) {
     
-    DebugSerial.println(F("Sleeping"));
-    DebugSerial.flush();
+    DEBUGSERIAL.println(F("Sleeping"));
+    DEBUGSERIAL.flush();
 
     rtc.standbyMode();
 
     /* if interrupt wakes us up, then we take action: */
-    DebugSerial.println(F("Waking up!"));
+    DEBUGSERIAL.println(F("Waking up!"));
   }
       
   interruptFlag = false;                              // reset the flag
@@ -137,34 +174,57 @@ void loop() {
     measuredvbat = analogRead(A7) * 2 * 3.3 / 1.024;
     distance = readMaxBotix(5, 9, 1);
 
-    DebugSerial.print("Battery voltage = ");
-    DebugSerial.println(measuredvbat);
-    DebugSerial.print("Distance = ");
-    DebugSerial.println(distance);
+    DEBUGSERIAL.print("Battery voltage = ");
+    DEBUGSERIAL.println(measuredvbat);
+    DEBUGSERIAL.print("Distance = ");
+    DEBUGSERIAL.println(distance);
 
-    // Store the data on the SD card. Change the file every day.
-    if(rtc.getDay() != myday) {
-      getFilename(rtc);
-      myday = rtc.getDay();
-    } 
-    myfile = SD.open(filename, FILE_WRITE);
-    myfile.print(rtc.getYear());
-    myfile.print("/");
-    myfile.print(rtc.getMonth());
-    myfile.print("/");
-    myfile.print(rtc.getDay());
-    myfile.print(" ");
-    myfile.print(rtc.getHours());
-    myfile.print(":");
-    myfile.print(rtc.getMinutes());
-    myfile.print(":");
-    myfile.print(rtc.getSeconds());
-    myfile.print(", ");
-    myfile.print(measuredvbat);
-    myfile.print(", ");
-    myfile.println(distance);
-    myfile.close();
-    DebugSerial.println("Data written to SD card!");
+    // prepare telemetry message:
+
+    CurrentTime = rtc.getEpoch();
+    messageLength = createTelemetryMessage(myMessage);
+
+    // attempt to connect to WiFi network:
+    i = 2;
+    while ((status != WL_CONNECTED) && (i < 0)) {
+      DEBUGSERIAL.print("Attempting to connect to SSID: ");
+      DEBUGSERIAL.println(ssid);
+      // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
+      status = WiFi.begin(ssid, pass);
+
+      // wait 10 seconds for connection:
+      delay(10000);
+      i--;
+    }
+
+    if(status = WL_CONNECTED) {
+      DEBUGSERIAL.println("Connected to wifi");
+      printWiFiStatus();
+      DEBUGSERIAL.print("Attempting to connect to the MQTT broker: ");
+      DEBUGSERIAL.println(broker);
+
+      mqttClient.setUsernamePassword(token, "");
+
+      if (!mqttClient.connect(broker, port)) {
+        DEBUGSERIAL.println(mqttClient.connectError());
+      } else {
+        DEBUGSERIAL.println("You're connected to the MQTT broker!");
+
+        DEBUGSERIAL.print("Sending message to topic: ");
+        DEBUGSERIAL.println(topic);
+        DEBUGSERIAL.println(myMessage);
+
+        // send message, the Print interface can be used to set the message contents
+        mqttClient.beginMessage(topic);
+        mqttClient.print(myMessage);
+        mqttClient.endMessage();
+
+        DEBUGSERIAL.println("Finished sending");
+      }
+
+    } else {
+      DEBUGSERIAL.println("Failed to connect to the wifi network. Check coverage and settings");
+    }
   }
 }
 
@@ -176,8 +236,6 @@ void loop() {
 void InterruptServiceRoutine() {
     interruptFlag = true;
 }
-
-
 
 int16_t readMaxBotix(uint8_t powerPin, uint8_t nreadings, bool debug) {
 
@@ -292,24 +350,24 @@ void error(uint8_t errno) {
 void PrintDateTime() {
     // Print date...
   print2digits(rtc.getDay());
-  DebugSerial.print("/");
+  DEBUGSERIAL.print("/");
   print2digits(rtc.getMonth());
-  DebugSerial.print("/");
-  DebugSerial.print(rtc.getYear());
-  DebugSerial.print(" ");
+  DEBUGSERIAL.print("/");
+  DEBUGSERIAL.print(rtc.getYear());
+  DEBUGSERIAL.print(" ");
   // ...and time
   print2digits(rtc.getHours());
-  DebugSerial.print(":");
+  DEBUGSERIAL.print(":");
   print2digits(rtc.getMinutes());
-  DebugSerial.print(":");
+  DEBUGSERIAL.print(":");
   print2digits(rtc.getSeconds());
 }
 
 void print2digits(int number) {
   if (number < 10) {
-    DebugSerial.print("0");
+    DEBUGSERIAL.print("0");
   }
-  DebugSerial.print(number);
+  DEBUGSERIAL.print(number);
 }
 
 void bubbleSort(int16_t A[],int len)
@@ -349,3 +407,46 @@ int16_t median(int16_t samples[],int m) //calculate the median
   }
 }
 
+void printWiFiStatus() {
+  // print the SSID of the network you're attached to:
+  DEBUGSERIAL.print("SSID: ");
+  DEBUGSERIAL.println(WiFi.SSID());
+
+  // print your WiFi shield's IP address:
+  IPAddress ip = WiFi.localIP();
+  DEBUGSERIAL.print("IP Address: ");
+  DEBUGSERIAL.println(ip);
+
+  // print the received signal strength:
+  long rssi = WiFi.RSSI();
+  DEBUGSERIAL.print("signal strength (RSSI):");
+  DEBUGSERIAL.print(rssi);
+  DEBUGSERIAL.println(" dBm");
+}
+
+uint16_t createTelemetryMessage(char *buffer) {
+
+    uint16_t i, j, index;
+    char string1[] = "{\"ts\":"; 
+    char string2[] = "000,\"values\":{\"h\":";
+    char string3[] = ",\"v\":";
+    char string4[] = "}}";
+    uint16_t bufferSize = 0;
+
+    memcpy(buffer + bufferSize, string1, 6);
+    bufferSize += 6;
+    sprintf((char*) (buffer + bufferSize), "%10lu", CurrentTime);   
+    bufferSize += 10;
+    memcpy(buffer + bufferSize, string2, 18);
+    bufferSize += 18;
+    sprintf((char*) (buffer + bufferSize), "%5d", distance);
+    bufferSize += 5;
+    memcpy(buffer + bufferSize, string3, 5);
+    bufferSize += 5;
+    sprintf((char*) (buffer + bufferSize), "%5d", measuredvbat);
+    bufferSize += 5;
+    memcpy(buffer + bufferSize, string4, 2);
+    bufferSize += 2;
+    buffer[bufferSize] = '\0';
+    return(bufferSize);
+}
