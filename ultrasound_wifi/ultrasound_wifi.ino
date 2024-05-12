@@ -31,8 +31,8 @@
 /*********** MAIN LOGGER SETTINGS *********/
 
 #define READ_INTERVAL 5                        // Interval for sensor readings, in minutes
-#define NREADINGS 9                             // number of readings taken per measurement (excluding 0 values)
-#define DEBUGSERIAL Serial                      // This makes it easy to switch between Serial and Serial1
+#define NREADINGS 9                            // number of readings taken per measurement (excluding 0 values)
+#define DEBUGSERIAL Serial                     // This makes it easy to switch between Serial and Serial1
 
 /************* INCLUDES *******************/
 
@@ -41,6 +41,7 @@
 // - ArduinoMqttClient by Arduino
 // - Wifi101 by Arduino
 // - RTCZero by Arduino
+// - NTPClient by Fabrice Weinberg
 // These can be installed through the Library Manager of the Arduino IDE
 
 #include <TimeLib.h>

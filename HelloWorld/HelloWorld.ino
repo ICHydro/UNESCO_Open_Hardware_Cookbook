@@ -11,18 +11,18 @@
  * (c) Riverlabs Ltd and Imperial College London
  */
 
+#define DEBUGSERIAL Serial1
+
 void setup() {
 
-  //Serial.begin(115200);
-  Serial1.begin(115200);
-  //while(!Serial);
+  DEBUGSERIAL.begin(9600);
+  while(!DEBUGSERIAL);
 
 }
 
 void loop() {
 
-  //Serial.println("Hello, World");
-  Serial1.println("Hello, World via Serial1");
+  DEBUGSERIAL.println("Hello, World!");
   delay(3000);
 
 }

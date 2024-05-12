@@ -11,7 +11,7 @@
  * (see READ_INTERVAL definition below)
  *
  * NOTES:
- * - Set the board definition to "Adafruit Feather M0 (SAMD21"
+ * - Set the board definition to "Adafruit Feather M0 (SAMD21)"
  * - For instructions on how to install the board definitions, see"
  *   https://learn.adafruit.com/adafruit-feather-m0-adalogger/setup
  * - Also don't forget to set the right upload port
@@ -31,7 +31,7 @@
 #define READ_INTERVAL 5                           // Interval for sensor readings, in minutes
 #define NREADINGS 9                               // number of readings taken per measurement (excluding 0 values)
 #define CARDSELECT 4
-#define DEBUGSERIAL Serial1                       // This makes it easy to switch between Serial and Serial1
+#define DEBUGSERIAL Serial                       // This makes it easy to switch between Serial and Serial1
 
 /************* INCLUDES *******************/
 
@@ -70,9 +70,7 @@ void setup() {
 
   DEBUGSERIAL.begin(9600);
   while(!DEBUGSERIAL);
-  #if DEBUGSERIAL != Serial1
-    Serial1.begin(9600);
-  #endif
+  Serial1.begin(9600);
   DEBUGSERIAL.println("Hello, I am a Riverlabs Ultrasonic distance logger");
 
   // pin 13 is used for the LED.
@@ -138,7 +136,8 @@ void loop() {
     DEBUGSERIAL.println(F("Sleeping"));
     DEBUGSERIAL.flush();
 
-    rtc.standbyMode();
+    while(!interruptFlag);
+    //rtc.standbyMode();
 
     /* if interrupt wakes us up, then we take action: */
     DEBUGSERIAL.println(F("Waking up!"));
@@ -208,6 +207,7 @@ int16_t readMaxBotix(uint8_t powerPin, uint8_t nreadings, bool debug) {
 
     digitalWrite(13, HIGH);                     // LED
     digitalWrite(powerPin, HIGH);
+    
     delay(160);   // wait 160ms for startup and boot message to pass
     
     uint32_t readstart = millis();

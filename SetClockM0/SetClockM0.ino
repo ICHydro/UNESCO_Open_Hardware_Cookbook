@@ -20,28 +20,28 @@ void setup() {
   rtc.setAlarmSeconds(0);
   rtc.enableAlarm(rtc.MATCH_SS);                //once a minute
   rtc.attachInterrupt(InterruptServiceRoutine);
-  while(!SerialUSB);
-  SerialUSB.println("Starting");
+  while(!Serial);
+  Serial.println("Starting");
 }
 
 
 void loop () {
-  SerialUSB.print(rtc.getHours());
-  SerialUSB.print(":");
-  SerialUSB.print(rtc.getMinutes());
-  SerialUSB.print(":");
-  SerialUSB.print(rtc.getSeconds());
+  Serial.print(rtc.getHours());
+  Serial.print(":");
+  Serial.print(rtc.getMinutes());
+  Serial.print(":");
+  Serial.print(rtc.getSeconds());
 
-  SerialUSB.println();
+  Serial.println();
 
   // we only want to show time every 10 seconds
   // but we want to show response to the interupt firing
   for (int timeCount = 0; timeCount < 20; timeCount++) {
 
     if (interruptFlag) {
-      SerialUSB.print(">>Interrupt Count: ");
-      SerialUSB.print(interruptCount);
-      SerialUSB.println("<<");
+      Serial.print(">>Interrupt Count: ");
+      Serial.print(interruptCount);
+      Serial.println("<<");
       interruptFlag = false;
     }
 
