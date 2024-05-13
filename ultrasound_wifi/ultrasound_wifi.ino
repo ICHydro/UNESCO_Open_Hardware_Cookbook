@@ -30,7 +30,7 @@
 
 /*********** MAIN LOGGER SETTINGS *********/
 
-#define READ_INTERVAL 5                        // Interval for sensor readings, in minutes
+#define READ_INTERVAL 1                        // Interval for sensor readings, in minutes
 #define NREADINGS 9                            // number of readings taken per measurement (excluding 0 values)
 #define DEBUGSERIAL Serial                     // This makes it easy to switch between Serial and Serial1
 
@@ -128,7 +128,7 @@ void setup() {
     DEBUGSERIAL.print("Attempting to connect to SSID: ");
     DEBUGSERIAL.println(ssid);
     // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
-    status = WiFi.begin(ssid, pass);
+    status = WiFi.begin(ssid);
 
     // wait 10 seconds for connection:
     delay(10000);
@@ -162,7 +162,8 @@ void loop() {
     DEBUGSERIAL.println(F("Sleeping"));
     DEBUGSERIAL.flush();
 
-    rtc.standbyMode();
+    while(!interruptFlag);
+    //rtc.standbyMode();
 
     /* if interrupt wakes us up, then we take action: */
     DEBUGSERIAL.println(F("Waking up!"));
